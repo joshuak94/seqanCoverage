@@ -81,11 +81,11 @@ int main(int argc, char ** argv)
 
     for (auto & rec : alignment_file)
     {
-        std::string query_name                  = seqan3::get<seqan3::field::id>(rec);
-        auto cigar_vector                       = seqan3::get<seqan3::field::cigar>(rec);                   // 6: CIGAR
-        const seqan3::sam_flag flag             = seqan3::get<seqan3::field::flag>(rec);                    // 2: FLAG
-        const auto ref_id                    = seqan3::get<seqan3::field::ref_id>(rec).value_or(-1);     // 3: RNAME
-        const auto pos                       = seqan3::get<seqan3::field::ref_offset>(rec).value_or(-1);  // 4: POS
+        std::string query_name                  = seqan3::get<seqan3::field::id>(rec);                       // ID
+        auto cigar_vector                       = seqan3::get<seqan3::field::cigar>(rec);                    // CIGAR
+        const seqan3::sam_flag flag             = seqan3::get<seqan3::field::flag>(rec);                     // FLAG
+        const auto ref_id                       = seqan3::get<seqan3::field::ref_id>(rec).value_or(-1);      // RNAME
+        const auto pos                          = seqan3::get<seqan3::field::ref_offset>(rec).value_or(-1);  // POS
         std::vector<int32_t> match_len{};
         std::vector<int32_t> match_pos{};
         uint32_t skip{0};

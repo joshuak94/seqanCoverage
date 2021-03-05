@@ -1,32 +1,60 @@
-#include <seqan3/io/sam_file/input.hpp>   // SAM/BAM support
+#include <seqan3/io/sam_file/input.hpp>     // SAM/BAM support
+#include <seqan3/argument_parser/all.hpp>   // For the argument parsing
 #include <seqan3/core/debug_stream.hpp>
 
 #include <filesystem>
 
 using seqan3::operator""_cigar_op;
 
+struct CmdOptions
+{
+    std::filesystem::path input_path{};
+    std::filesystem::path output_path{};
+};
+
 template<typename stream_type>
 //!cond
     requires seqan3::output_stream<stream_type>
 //!endcond
-void write_output(std::string chrName, std::vector<uint32_t> & chrCov, stream_type & out_stream)
+void write_output(std::string chrName, std::vector<uint32_t> & chrCov, stream_type & output_stream)
 {
     int pos{1};
     for (auto i : chrCov)
     {
         if (i > 0)
         {
-            out_stream << chrName << "\t" << pos << "\t" << i << std::endl;
+            output_stream << chrName << "\t" << pos << "\t" << i << std::endl;
         }
         pos++;
     }
 }
 
-int main([[ maybe_unused ]]int argc, [[ maybe_unused ]]char const ** argv)
+void initialize_parser(seqan3::argument_parser & parser, CmdOptions & options)
 {
-    std::filesystem::path alignment_path = "/project/zvi/Joshua_Kim/VistaEnhancerValidation/PoolSequencing/P-PB.bam";
-    std::filesystem::path output_file_path = "/home/kim_j/development/b_scratch/output.txt";
-    std::ofstream out_file{output_file_path.c_str()};
+    parser.add_option(options.input_path, 'i', "input",
+                      "The path to the input BAM/SAM file. Must be sorted!",
+                      seqan3::option_spec::required,
+                      seqan3::input_file_validator{{"sam", "bam"}});
+    parser.add_option(options.output_path, 'o', "output",
+                      "The path and filename for the desired output file. Default is to output to standard out.",
+                      seqan3::option_spec::standard,
+                      seqan3::output_file_validator{seqan3::output_file_open_options::create_new, {}});
+}
+
+int main(int argc, char ** argv)
+{
+    seqan3::argument_parser parser{"SeqAnCoverage", argc, argv};
+    CmdOptions options{};
+    initialize_parser(parser, options);
+    try
+    {
+         parser.parse();                                                  // trigger command line parsing
+    }
+    catch (seqan3::argument_parser_error const & ext)                     // catch user errors
+    {
+        seqan3::debug_stream << "[ERROR] " << ext.what() << "\n"; // customise your error message
+        return -1;
+    }
 
     // Open input alignment file
     using my_fields = seqan3::fields<seqan3::field::id,
@@ -36,7 +64,13 @@ int main([[ maybe_unused ]]int argc, [[ maybe_unused ]]char const ** argv)
                                      seqan3::field::ref_offset,
                                      seqan3::field::mapq>;
 
-    seqan3::sam_file_input alignment_file{alignment_path, my_fields{}};
+    seqan3::sam_file_input alignment_file{options.input_path, my_fields{}};
+    std::ofstream output_stream{};
+
+    if (!options.output_path.empty())
+    {
+        output_stream.open(options.output_path.c_str());
+    }
 
     int32_t curChr{-1};
     std::vector<uint32_t> chrCov{};
@@ -59,7 +93,14 @@ int main([[ maybe_unused ]]int argc, [[ maybe_unused ]]char const ** argv)
         {
             if (curChr != -1)
             {
-                write_output(alignment_file.header().ref_ids()[curChr], chrCov, out_file);
+                if (options.output_path.empty())
+                {
+                    write_output(alignment_file.header().ref_ids()[curChr], chrCov, std::cout);
+                }
+                else
+                {
+                    write_output(alignment_file.header().ref_ids()[curChr], chrCov, output_stream);
+                }
             }
             curChr = ref_id;
             chrCov.assign(std::get<0>(alignment_file.header().ref_id_info[curChr]), 0);
@@ -87,7 +128,15 @@ int main([[ maybe_unused ]]int argc, [[ maybe_unused ]]char const ** argv)
             std::transform(std::begin(chrCov) + pos + match_pos[i], std::begin(chrCov) + pos + match_pos[i] + match_len[i], std::begin(chrCov) + pos + match_pos[i],[](auto x){return x+1;});
         }
     }
-    write_output(alignment_file.header().ref_ids()[curChr], chrCov, out_file);
-    out_file.close();
 
+    // Write last chromosome to file.
+    if (options.output_path.empty())
+    {
+        write_output(alignment_file.header().ref_ids()[curChr], chrCov, std::cout);
+    }
+    else
+    {
+        write_output(alignment_file.header().ref_ids()[curChr], chrCov, output_stream);
+        output_stream.close();
+    }
 }

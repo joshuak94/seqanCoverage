@@ -3,6 +3,8 @@
 #include <seqan3/core/debug_stream.hpp>
 
 #include <filesystem>
+#include <iostream>
+#include <sstream>
 
 using seqan3::operator""_cigar_op;
 
@@ -19,14 +21,16 @@ template<typename stream_type>
 void write_output(std::string chrName, std::vector<uint32_t> & chrCov, stream_type & output_stream)
 {
     int pos{1};
+    std::stringstream buffer{};
     for (auto i : chrCov)
     {
         if (i > 0)
         {
-            output_stream << chrName << "\t" << pos << "\t" << i << std::endl;
+            buffer << chrName << '\t' << pos << '\t' << i << '\n';
         }
-        pos++;
+        ++pos;
     }
+    output_stream << buffer.rdbuf();
 }
 
 void initialize_parser(seqan3::argument_parser & parser, CmdOptions & options)
@@ -123,7 +127,7 @@ int main(int argc, char ** argv)
         }
 
         // Add coverage to vector.
-        for (size_t i = 0; i < match_len.size(); i++)
+        for (size_t i = 0; i < match_len.size(); ++i)
         {
             std::transform(std::begin(chrCov) + pos + match_pos[i], std::begin(chrCov) + pos + match_pos[i] + match_len[i], std::begin(chrCov) + pos + match_pos[i],[](auto x){return x+1;});
         }

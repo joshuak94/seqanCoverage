@@ -2,36 +2,64 @@
 #include <seqan3/argument_parser/all.hpp>   // For the argument parsing
 #include <seqan3/core/debug_stream.hpp>
 
+#include <seqan/bam_io.h>
+
 #include <filesystem>
 #include <iostream>
 #include <sstream>
+#include <chrono>
+#include <ctime>
+#include <cstring>
 
-using seqan3::operator""_cigar_op;
+using namespace seqan3::literals;
+
+#define RUN(x, y) {startTimeMessage(y);x;endTimeMessage(y);}
+
+time_t _t1, _t2;
+std::chrono::time_point<std::chrono::system_clock> _m1, _m2;
+
+void printTimeMessage(std::string msg)
+{
+    time_t t = time(0);
+    struct tm* now = localtime(&t);
+    seqan3::debug_stream << "[ " << std::put_time(now, "%d-%m-%Y %H:%M:%S") << "] " << msg << '\n';
+}
+
+void startTimeMessage(std::string msg)
+{
+    time(&_t1);
+    _m1 = std::chrono::time_point_cast<std::chrono::microseconds>(std::chrono::system_clock::now());
+    printTimeMessage("[START] " + msg);
+}
+
+void endTimeMessage(std::string msg)
+{
+    using std::chrono::operator""ms;
+    using std::chrono::operator""us;
+    time(&_t2);
+    _m2 = std::chrono::time_point_cast<std::chrono::microseconds>(std::chrono::system_clock::now());
+    auto difference = std::chrono::duration_cast<std::chrono::microseconds>(_m2 - _m1);
+    if (difference < 1000us)
+    {
+        printTimeMessage("[END] " + msg + " (" + std::to_string(difference.count()) + " microseconds.)");
+    }
+    else if (difference >= 1000us && difference < 1000ms)
+    {
+        printTimeMessage("[END] " + msg + " (" +
+                         std::to_string((std::chrono::duration_cast<std::chrono::milliseconds>(difference)).count()) +
+                         " milliseconds.)");
+    }
+    else
+    {
+        printTimeMessage("[END] " + msg + " (" + std::to_string((int)difftime(_t2,_t1)) + " seconds.)");
+    }
+}
 
 struct CmdOptions
 {
     std::filesystem::path input_path{};
-    std::filesystem::path output_path{};
+    uint32_t num_threads{1};
 };
-
-template<typename stream_type>
-//!cond
-    requires seqan3::output_stream<stream_type>
-//!endcond
-void write_output(std::string chrName, std::vector<uint32_t> & chrCov, stream_type & output_stream)
-{
-    int pos{1};
-    std::stringstream buffer{};
-    for (auto i : chrCov)
-    {
-        if (i > 0)
-        {
-            buffer << chrName << '\t' << pos << '\t' << i << '\n';
-        }
-        ++pos;
-    }
-    output_stream << buffer.rdbuf();
-}
 
 void initialize_parser(seqan3::argument_parser & parser, CmdOptions & options)
 {
@@ -39,10 +67,63 @@ void initialize_parser(seqan3::argument_parser & parser, CmdOptions & options)
                       "The path to the input BAM/SAM file. Must be sorted!",
                       seqan3::option_spec::required,
                       seqan3::input_file_validator{{"sam", "bam"}});
-    parser.add_option(options.output_path, 'o', "output",
-                      "The path and filename for the desired output file. Default is to output to standard out.",
-                      seqan3::option_spec::standard,
-                      seqan3::output_file_validator{seqan3::output_file_open_options::create_new, {}});
+    parser.add_option(options.num_threads, 't', "threads",
+		      "The number of threads to use for decompression.");
+}
+
+std::vector<std::uint64_t> parse_sam_file_default(std::filesystem::path const & input_path)
+{
+    seqan3::sam_file_input input_file{input_path};
+    std::vector<std::uint64_t> ref_offset_vector{};
+    for (auto & rec : input_file)
+    {
+        ref_offset_vector.push_back(rec.reference_position().value_or(0));
+    }
+
+    return ref_offset_vector;
+}
+
+std::vector<std::uint64_t> parse_sam_file_minimal(std::filesystem::path const & input_path)
+{
+    seqan3::sam_file_input input_file{input_path, seqan3::fields<seqan3::field::ref_offset>{}};
+    std::vector<uint64_t> ref_offset_vector{};
+    for (auto & rec : input_file)
+    {
+        ref_offset_vector.push_back(rec.reference_position().value_or(0));
+    }
+
+    return ref_offset_vector;
+}
+
+std::vector<std::uint64_t> parse_sam_file_seqan2(std::filesystem::path const & input_path)
+{
+    seqan::BamFileIn input_file;
+    std::vector<uint64_t> ref_offset_vector{};
+    if (!open(input_file, seqan::toCString(input_path.string())))
+    {
+        std::cerr << "ERROR: Could not open " << input_path << std::endl;
+        return ref_offset_vector;
+    }
+
+    try
+    {
+        // Copy header.
+        seqan::BamHeader header;
+        seqan::readHeader(header, input_file);
+
+        // Copy records.
+        seqan::BamAlignmentRecord record;
+        while (!seqan::atEnd(input_file))
+        {
+            seqan::readRecord(record, input_file);
+            ref_offset_vector.push_back(record.beginPos);
+        }
+    }
+    catch (seqan::Exception const & e)
+    {
+        std::cout << "ERROR: " << e.what() << std::endl;
+    }
+    return ref_offset_vector;
 }
 
 int main(int argc, char ** argv)
@@ -60,87 +141,9 @@ int main(int argc, char ** argv)
         return -1;
     }
 
-    // Open input alignment file
-    using my_fields = seqan3::fields<seqan3::field::id,
-                                     seqan3::field::cigar,
-                                     seqan3::field::flag,
-                                     seqan3::field::ref_id,
-                                     seqan3::field::ref_offset,
-                                     seqan3::field::mapq>;
+    seqan3::contrib::bgzf_thread_count = options.num_threads;
+    RUN(parse_sam_file_seqan2(options.input_path), "Seqan2 parsing.");
+    RUN(parse_sam_file_minimal(options.input_path), "Minimal parsing.");
+    RUN(parse_sam_file_default(options.input_path), "Default parsing.");
 
-    seqan3::sam_file_input alignment_file{options.input_path, my_fields{}};
-    std::ofstream output_stream{};
-
-    if (!options.output_path.empty())
-    {
-        output_stream.open(options.output_path.c_str());
-    }
-
-    int32_t curChr{-1};
-    std::vector<uint32_t> chrCov{};
-
-    for (auto & rec : alignment_file)
-    {
-        std::string query_name                  = seqan3::get<seqan3::field::id>(rec);
-        auto cigar_vector                       = seqan3::get<seqan3::field::cigar>(rec);                   // 6: CIGAR
-        const seqan3::sam_flag flag             = seqan3::get<seqan3::field::flag>(rec);                    // 2: FLAG
-        const auto ref_id                    = seqan3::get<seqan3::field::ref_id>(rec).value_or(-1);     // 3: RNAME
-        const auto pos                       = seqan3::get<seqan3::field::ref_offset>(rec).value_or(-1);  // 4: POS
-        std::vector<int32_t> match_len{};
-        std::vector<int32_t> match_pos{};
-        uint32_t skip{0};
-
-        // Skip incorrect reads.
-        if ((static_cast<uint16_t>(flag) & 0x0004) == 0x0004 || ref_id == -1 || pos == -1) continue;
-        // Write to output before starting the next chromosome.
-        if (curChr != ref_id)
-        {
-            if (curChr != -1)
-            {
-                if (options.output_path.empty())
-                {
-                    write_output(alignment_file.header().ref_ids()[curChr], chrCov, std::cout);
-                }
-                else
-                {
-                    write_output(alignment_file.header().ref_ids()[curChr], chrCov, output_stream);
-                }
-            }
-            curChr = ref_id;
-            chrCov.assign(std::get<0>(alignment_file.header().ref_id_info[curChr]), 0);
-        }
-
-        // Calculate covered positions from CIGAR string.
-        for (seqan3::cigar & pair : cigar_vector)
-        {
-            using seqan3::get;
-            int32_t length = get<0>(pair);
-            seqan3::cigar_op operation = get<1>(pair);
-            if (operation == 'S'_cigar_op || operation == 'H'_cigar_op || operation == 'I'_cigar_op || operation == 'P'_cigar_op) continue;
-            if (operation == 'M'_cigar_op || operation == '='_cigar_op || operation == 'X'_cigar_op)
-            {
-                match_len.push_back(length);
-                match_pos.push_back(skip);
-            }
-            // Okay for D and N
-            skip += length;
-        }
-
-        // Add coverage to vector.
-        for (size_t i = 0; i < match_len.size(); ++i)
-        {
-            std::transform(std::begin(chrCov) + pos + match_pos[i], std::begin(chrCov) + pos + match_pos[i] + match_len[i], std::begin(chrCov) + pos + match_pos[i],[](auto x){return x+1;});
-        }
-    }
-
-    // Write last chromosome to file.
-    if (options.output_path.empty())
-    {
-        write_output(alignment_file.header().ref_ids()[curChr], chrCov, std::cout);
-    }
-    else
-    {
-        write_output(alignment_file.header().ref_ids()[curChr], chrCov, output_stream);
-        output_stream.close();
-    }
 }
